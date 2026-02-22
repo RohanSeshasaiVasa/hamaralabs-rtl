@@ -1,15 +1,16 @@
 services:
   hamaralabs-rtl:
     container_name: hamaralabs-rtl
+    restart: always
     image: ghcr.io/vmss2009/hamaralabs-rtl:v1
+    init: true
     ports:
-      - "3006:3000"
+      - "3001:3000"
     env_file:
       - .env
     networks:
-      - hamaralabs-net
+      - hamaralabs-network
 
 networks:
-  hamaralabs-net:
+  hamaralabs-network:
     external: true
-    name: calendar_hamaralabs-net
