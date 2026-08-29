@@ -14,7 +14,13 @@ export default function BuyPage() {
       id: string;
       userId: string;
       date: string; // ISO date
-      timeSlots: string[]; // e.g. "20:00-21:00"
+      timeSlots: Array<{
+        id: string;
+        startTime: string; // "HH:MM"
+        endTime: string; // "HH:MM"
+        maxSlots: number;
+        bookedSlots: number;
+      }>;
       createdAt?: string;
       updatedAt?: string;
     }>
@@ -28,7 +34,7 @@ export default function BuyPage() {
 
   const paymentPortal = process.env.NEXT_PUBLIC_PAYMENT_PORTAL || "https://hamaralabs.com";
   const merchantId = "${merchantId}";
-  const siteUrl = "https://rtl.hamaralabs.com";
+  const siteUrl = process.env.NEXT_PUBLIC_SITE_URL || "https://hamaralabs.com";
 
   const merchantTransactionId = useMemo(() => `MT${Date.now()}`, []);
   const merchantUserId = useMemo(() => `MUI${Date.now()}`, []);
@@ -285,21 +291,26 @@ export default function BuyPage() {
                           <div className="text-sm font-medium mb-2">{dateLabel}</div>
                           <div className="flex flex-wrap gap-2">
             {sch.timeSlots.map((ts) => {
+                              const label = `${ts.startTime}-${ts.endTime}`;
+                              const isFull = ts.bookedSlots >= ts.maxSlots;
                               const isSelected =
-                                selectedSlot?.date === sch.date && selectedSlot?.time === ts;
+                                selectedSlot?.date === sch.date && selectedSlot?.time === label;
                               return (
                                 <button
-                                  key={`${sch.id}-${ts}`}
+                                  key={ts.id}
                                   type="button"
-                                  onClick={() => setSelectedSlot({ date: sch.date, time: ts })}
+                                  disabled={isFull}
+                                  onClick={() => setSelectedSlot({ date: sch.date, time: label })}
                                   className={
                                     `rounded-xl border px-3 py-1.5 text-sm transition ` +
-                                    (isSelected
+                                    (isFull
+                                      ? "border-[var(--foreground)]/10 text-[var(--foreground)]/30 cursor-not-allowed"
+                                      : isSelected
                                       ? "border-[var(--foreground)] bg-[var(--foreground)] text-[var(--background)]"
                                       : "border-[var(--foreground)]/20 hover:border-[var(--foreground)]/40")
                                   }
                                 >
-                                  {ts} IST
+                                  {label} IST
                                 </button>
                               );
                             })}

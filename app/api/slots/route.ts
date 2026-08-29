@@ -6,6 +6,7 @@ export async function POST(req: Request) {
   const body = await req.json();
     const headers: Record<string, string> = {
       "content-type": "application/json",
+      "X-Api-Key": process.env.BACKEND_API_KEY || "",
     };
     // Forward cookies/authorization if present (useful when backend needs session)
     const cookie = req.headers.get("cookie");

@@ -204,6 +204,8 @@ export default function PaymentsReturnPage() {
           const date = dateIso.split("T")[0];
           const timeSlot = selectedSlot?.time || "";
           if (!timeSlot) throw new Error("Missing selected time slot.");
+          const [startTime, endTime] = timeSlot.split("-");
+          if (!startTime || !endTime) throw new Error("Invalid selected time slot.");
 
           const bookingRes = await fetch("/api/bookings", {
             method: "POST",
@@ -211,7 +213,8 @@ export default function PaymentsReturnPage() {
             body: JSON.stringify({
               username,
               date,
-              timeSlot,
+              startTime,
+              endTime,
               guestName: email || "",
               guestEmail: phone || "",
               notes: unifiedNotes,
