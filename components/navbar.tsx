@@ -27,6 +27,9 @@ export default function Navbar() {
           <Link href="/buy" className={linkClasses("/buy")}>
             Buy
           </Link>
+          <Link href="/login" className={linkClasses("/login")}>
+            Login
+          </Link>
         </nav>
       </div>
     </header>
