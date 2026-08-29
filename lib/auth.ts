@@ -3,9 +3,7 @@ import crypto from "crypto";
 const SECRET = process.env.AUTH_SECRET || "";
 
 export const OTP_COOKIE = "otp_challenge";
-export const SESSION_COOKIE = "session";
 export const OTP_TTL_SECONDS = 10 * 60; // 10 minutes
-export const SESSION_TTL_SECONDS = 7 * 24 * 60 * 60; // 7 days
 
 function sign(payload: string) {
   return crypto.createHmac("sha256", SECRET).update(payload).digest("base64url");

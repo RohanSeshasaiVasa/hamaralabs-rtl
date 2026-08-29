@@ -2,6 +2,7 @@
 
 import { useState } from "react";
 import { useRouter } from "next/navigation";
+import { signIn } from "next-auth/react";
 
 export default function LoginPage() {
   const router = useRouter();
@@ -36,13 +37,8 @@ export default function LoginPage() {
     setSubmitting(true);
     setError(null);
     try {
-      const res = await fetch("/api/auth/verify-code", {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ email, code }),
-      });
-      const data = await res.json().catch(() => ({}));
-      if (!res.ok) throw new Error(data?.message || "Invalid code");
+      const res = await signIn("credentials", { email, code, redirect: false });
+      if (res?.error) throw new Error("Invalid or expired code");
       router.push("/my-bookings");
       router.refresh();
     } catch (err: any) {

@@ -1,6 +1,5 @@
-import { cookies } from "next/headers";
 import { redirect } from "next/navigation";
-import { verifyToken, SESSION_COOKIE } from "@/lib/auth";
+import { auth } from "@/auth";
 import LogoutButton from "./logout-button";
 
 type Booking = {
@@ -25,12 +24,10 @@ type Slot = {
 };
 
 export default async function MyBookingsPage() {
-  const cookieStore = await cookies();
-  const session = verifyToken<{ exp: number; email: string }>(
-    cookieStore.get(SESSION_COOKIE)?.value
-  );
+  const session = await auth();
+  const email = session?.user?.email;
 
-  if (!session?.email) {
+  if (!email) {
     redirect("/login");
   }
 
@@ -38,7 +35,7 @@ export default async function MyBookingsPage() {
   const apiKey = process.env.BACKEND_API_KEY || "";
 
   const res = await fetch(
-    `${backendBase}/api/slots/by-email?email=${encodeURIComponent(session.email)}`,
+    `${backendBase}/api/slots/by-email?email=${encodeURIComponent(email)}`,
     { method: "GET", headers: { "X-Api-Key": apiKey }, cache: "no-store" }
   );
 
@@ -53,7 +50,7 @@ export default async function MyBookingsPage() {
       <div className="mb-8 flex items-center justify-between">
         <div>
           <h1 className="text-3xl font-bold">My bookings</h1>
-          <p className="mt-1 text-sm text-[var(--foreground)]/70">{session.email}</p>
+          <p className="mt-1 text-sm text-[var(--foreground)]/70">{email}</p>
         </div>
         <LogoutButton />
       </div>
