@@ -3,6 +3,7 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useSearchParams, useRouter } from "next/navigation";
+import Link from "next/link";
 import * as htmlToImage from "html-to-image";
 import jsPDF from "jspdf";
 
@@ -217,6 +218,7 @@ export default function PaymentsReturnPage() {
               endTime,
               guestName: email || "",
               guestEmail: phone || "",
+              contactEmail: email || "",
               notes: unifiedNotes,
               slotId,
             }),
@@ -356,6 +358,9 @@ export default function PaymentsReturnPage() {
           <>
             <div className="mt-6 rounded-xl bg-emerald-50 border border-emerald-200 p-4 text-sm text-emerald-800">
               You will get an email from <b>support@hamaralabs.com</b> (please check spam, if not found in inbox) regarding the session details. Thanks for your payment!
+            </div>
+            <div className="mt-4 rounded-xl bg-sky-50 border border-sky-200 p-4 text-sm text-sky-800">
+              To join your session, click <Link href="/login" className="font-semibold underline">Login</Link>, enter the email you used for this booking, and enjoy the experience!
             </div>
             <div className="mt-6 flex gap-3 no-print">
               <button

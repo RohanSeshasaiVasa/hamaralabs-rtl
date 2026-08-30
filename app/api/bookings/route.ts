@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-
+import { sendBookingConfirmationEmail } from "@/lib/email";
 
 export async function POST(req: Request) {
   const backendBase = process.env.BACKEND_SERVER || "";
@@ -41,6 +41,22 @@ export async function POST(req: Request) {
     const data = await res
       .json()
       .catch(() => ({ message: "Invalid JSON from backend" }));
+
+    if (res.ok) {
+      const contactEmail = body?.contactEmail || body?.guestName;
+      if (contactEmail && body?.date && body?.startTime && body?.endTime) {
+        try {
+          await sendBookingConfirmationEmail(contactEmail, {
+            date: body.date,
+            startTime: body.startTime,
+            endTime: body.endTime,
+          });
+        } catch (err) {
+          console.error("Failed to send booking confirmation email:", err);
+        }
+      }
+    }
+
     return NextResponse.json(data, { status: res.status });
   } catch (err: any) {
     return NextResponse.json(

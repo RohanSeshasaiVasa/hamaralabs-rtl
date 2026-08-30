@@ -51,7 +51,7 @@ export default function BuyPage() {
       setSlotsError(null);
       try {
         const res = await fetch(
-          `https://calendar.hamaralabs.com/api/schedules/public/${process.env.NEXT_PUBLIC_CALENDAR_USER || "mohan487"}`,
+          `https://calendar.hamaralabs.com/api/schedules/public/${process.env.NEXT_PUBLIC_CALENDAR_USER || "mohan487"}?leadMinutes=1`,
           { cache: "no-store" }
         );
         if (!res.ok) throw new Error(`Failed to load slots (${res.status})`);
