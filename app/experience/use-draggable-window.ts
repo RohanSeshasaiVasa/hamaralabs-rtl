@@ -1,4 +1,6 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+"use client";
+
+import { useCallback, useEffect, useRef, useState, type RefObject } from "react";
 
 export type Position = { x: number; y: number };
 
@@ -14,14 +16,11 @@ type DragState = {
 const MIN_OFFSET = 16;
 
 /**
- * Shared drag/position logic for the floating windows inside the experience stage (guided
- * steps, chat). Positions itself relative to `stageRef` and re-clamps on resize so the window
- * never drifts off-screen.
+ * Draggable-window positioning shared by every floating panel inside the experience stage
+ * (guided steps, chat). Clamps to the bounds of `boundsRef` so a window can never be
+ * dragged off-stage, and re-clamps automatically on resize.
  */
-export function useDraggableWindow(
-  stageRef: React.RefObject<HTMLElement | null>,
-  computeDefaultPosition: (stage: HTMLElement, win: HTMLElement) => Position
-) {
+export function useDraggableWindow(boundsRef: RefObject<HTMLElement | null>) {
   const windowRef = useRef<HTMLDivElement>(null);
   const dragRef = useRef<DragState | null>(null);
   const [position, setPosition] = useState<Position>({ x: MIN_OFFSET, y: MIN_OFFSET });
@@ -29,39 +28,20 @@ export function useDraggableWindow(
 
   const clampPosition = useCallback(
     (pos: Position): Position => {
-      const stage = stageRef.current;
+      const bounds = boundsRef.current;
       const win = windowRef.current;
-      if (!stage || !win) return pos;
+      if (!bounds || !win) return pos;
 
-      const maxX = Math.max(MIN_OFFSET, stage.clientWidth - win.offsetWidth - MIN_OFFSET);
-      const maxY = Math.max(MIN_OFFSET, stage.clientHeight - win.offsetHeight - MIN_OFFSET);
+      const maxX = Math.max(MIN_OFFSET, bounds.clientWidth - win.offsetWidth - MIN_OFFSET);
+      const maxY = Math.max(MIN_OFFSET, bounds.clientHeight - win.offsetHeight - MIN_OFFSET);
 
       return {
         x: Math.min(Math.max(pos.x, MIN_OFFSET), maxX),
         y: Math.min(Math.max(pos.y, MIN_OFFSET), maxY),
       };
     },
-    [stageRef]
+    [boundsRef]
   );
-
-  const resetToDefault = useCallback(() => {
-    const stage = stageRef.current;
-    const win = windowRef.current;
-    if (!stage || !win) return;
-    setPosition(clampPosition(computeDefaultPosition(stage, win)));
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [clampPosition, stageRef]);
-
-  useEffect(() => {
-    const frameId = requestAnimationFrame(resetToDefault);
-    return () => cancelAnimationFrame(frameId);
-  }, [resetToDefault]);
-
-  useEffect(() => {
-    const handleResize = () => setPosition((current) => clampPosition(current));
-    window.addEventListener("resize", handleResize);
-    return () => window.removeEventListener("resize", handleResize);
-  }, [clampPosition]);
 
   const startDrag = useCallback(
     ({
@@ -90,24 +70,32 @@ export function useDraggableWindow(
 
   const updateDrag = useCallback(
     (clientX: number, clientY: number) => {
-      const dragState = dragRef.current;
-      if (!dragState) return;
+      const drag = dragRef.current;
+      if (!drag) return;
       setPosition(
         clampPosition({
-          x: dragState.originX + clientX - dragState.startX,
-          y: dragState.originY + clientY - dragState.startY,
+          x: drag.originX + clientX - drag.startX,
+          y: drag.originY + clientY - drag.startY,
         })
       );
     },
     [clampPosition]
   );
 
-  const cancelDrag = useCallback(() => {
+  const stopDrag = useCallback(() => {
     dragRef.current = null;
     setIsDragging(false);
   }, []);
 
-  const onPointerDown = useCallback(
+  useEffect(() => {
+    const handleResize = () => {
+      setPosition((current) => clampPosition(current));
+    };
+    window.addEventListener("resize", handleResize);
+    return () => window.removeEventListener("resize", handleResize);
+  }, [clampPosition]);
+
+  const handlePointerDown = useCallback(
     (event: React.PointerEvent<HTMLDivElement>) => {
       if (event.pointerType === "mouse" && event.button !== 0) return;
       if ((event.target as HTMLElement).closest("button")) return;
@@ -119,29 +107,29 @@ export function useDraggableWindow(
     [startDrag]
   );
 
-  const onPointerMove = useCallback(
+  const handlePointerMove = useCallback(
     (event: React.PointerEvent<HTMLDivElement>) => {
-      const dragState = dragRef.current;
-      if (!dragState || dragState.pointerId !== event.pointerId) return;
+      const drag = dragRef.current;
+      if (!drag || drag.pointerId !== event.pointerId) return;
       event.preventDefault();
       updateDrag(event.clientX, event.clientY);
     },
     [updateDrag]
   );
 
-  const onPointerUp = useCallback(
+  const handlePointerUp = useCallback(
     (event: React.PointerEvent<HTMLDivElement>) => {
-      const dragState = dragRef.current;
-      if (!dragState || dragState.pointerId !== event.pointerId) return;
-      cancelDrag();
+      const drag = dragRef.current;
+      if (!drag || drag.pointerId !== event.pointerId) return;
+      stopDrag();
       if (event.currentTarget.hasPointerCapture?.(event.pointerId)) {
         event.currentTarget.releasePointerCapture(event.pointerId);
       }
     },
-    [cancelDrag]
+    [stopDrag]
   );
 
-  const onTouchStart = useCallback(
+  const handleTouchStart = useCallback(
     (event: React.TouchEvent<HTMLDivElement>) => {
       if (typeof window !== "undefined" && window.PointerEvent) return;
       if ((event.target as HTMLElement).closest("button")) return;
@@ -155,13 +143,13 @@ export function useDraggableWindow(
     [startDrag]
   );
 
-  const onTouchMove = useCallback(
+  const handleTouchMove = useCallback(
     (event: React.TouchEvent<HTMLDivElement>) => {
       if (typeof window !== "undefined" && window.PointerEvent) return;
-      const dragState = dragRef.current;
-      if (!dragState || dragState.touchId === null) return;
+      const drag = dragRef.current;
+      if (!drag || drag.touchId === null) return;
 
-      const activeTouch = Array.from(event.changedTouches).find((touch) => touch.identifier === dragState.touchId);
+      const activeTouch = Array.from(event.changedTouches).find((touch) => touch.identifier === drag.touchId);
       if (!activeTouch) return;
 
       event.preventDefault();
@@ -170,34 +158,36 @@ export function useDraggableWindow(
     [updateDrag]
   );
 
-  const onTouchEnd = useCallback(
+  const handleTouchEnd = useCallback(
     (event: React.TouchEvent<HTMLDivElement>) => {
       if (typeof window !== "undefined" && window.PointerEvent) return;
-      const dragState = dragRef.current;
-      if (!dragState || dragState.touchId === null) return;
+      const drag = dragRef.current;
+      if (!drag || drag.touchId === null) return;
 
-      const endedTouch = Array.from(event.changedTouches).find((touch) => touch.identifier === dragState.touchId);
+      const endedTouch = Array.from(event.changedTouches).find((touch) => touch.identifier === drag.touchId);
       if (!endedTouch) return;
 
-      cancelDrag();
+      stopDrag();
     },
-    [cancelDrag]
+    [stopDrag]
   );
 
   return {
     windowRef,
     position,
+    setPosition,
     isDragging,
-    cancelDrag,
+    clampPosition,
+    cancelDrag: stopDrag,
     dragHandlers: {
-      onPointerDown,
-      onPointerMove,
-      onPointerUp,
-      onPointerCancel: onPointerUp,
-      onTouchStart,
-      onTouchMove,
-      onTouchEnd,
-      onTouchCancel: onTouchEnd,
+      onPointerDown: handlePointerDown,
+      onPointerMove: handlePointerMove,
+      onPointerUp: handlePointerUp,
+      onPointerCancel: handlePointerUp,
+      onTouchStart: handleTouchStart,
+      onTouchMove: handleTouchMove,
+      onTouchEnd: handleTouchEnd,
+      onTouchCancel: handleTouchEnd,
     },
   };
 }

@@ -4,6 +4,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import * as LivekitClient from "livekit-client";
 import { useDraggableWindow } from "./use-draggable-window";
+import ChatWindow from "./chat-window";
 
 const EXPERIMENT = {
   id: "know-voltage",
@@ -36,59 +37,28 @@ const actionSteps: Array<{
 const LIVEKIT_SERVER_URL = "wss://livestream.hamaralabs.com";
 const LIVEKIT_TOKEN_ENDPOINT = "https://livestream.hamaralabs.com/token?identity=viewer";
 
-const CHATWOOT_BASE_URL = process.env.NEXT_PUBLIC_CHATWOOT_BASE_URL || "https://chatwoot.hamaralabs.com";
-const CHATWOOT_WEBSITE_TOKEN = process.env.NEXT_PUBLIC_CHATWOOT_WEBSITE_TOKEN || "";
-
-const WINDOW_DEFAULT_OFFSET = 24;
-const COMPLETION_POLL_INTERVAL_MS = 10_000;
+const STEPS_WINDOW_DEFAULT_OFFSET = 24;
 
 type Notification = { id: string; message: string };
-type ChatSession =
-  | { status: "loading" }
-  | { status: "inactive" }
-  | { status: "active"; email: string; name: string; identifierHash: string };
 
-// setUser() links the widget's own contact_inbox to our contact, and the SDK writes that
-// contact_inbox's source_id into the cw_conversation cookie — that's the id our server needs
-// to attach the conversation to the same contact_inbox the widget is actually reading from.
-async function waitForSourceId(tries = 20): Promise<string | null> {
-  for (let i = 0; i < tries; i++) {
-    const raw = document.cookie.match(/(?:^|;\s*)cw_conversation=([^;]+)/)?.[1];
-    if (raw) {
-      const payload = decodeURIComponent(raw).split(".")[1];
-      return JSON.parse(atob(payload.replace(/-/g, "+").replace(/_/g, "/"))).source_id;
-    }
-    await new Promise((r) => setTimeout(r, 150));
-  }
-  return null;
-}
+const COMPLETION_POLL_INTERVAL_MS = 10_000;
 
 export default function ExperienceStage({ bookingId }: { bookingId: string }) {
   const router = useRouter();
 
   const [runningStepId, setRunningStepId] = useState<string | null>(null);
   const [isStepsWindowCollapsed, setIsStepsWindowCollapsed] = useState(false);
-  const [isChatWindowCollapsed, setIsChatWindowCollapsed] = useState(false);
   const [notifications, setNotifications] = useState<Notification[]>([]);
   const [isFeedReady, setIsFeedReady] = useState(false);
   const [isPortrait, setIsPortrait] = useState(false);
-  const [chatSession, setChatSession] = useState<ChatSession>({ status: "loading" });
 
   const videoRef = useRef<HTMLVideoElement>(null);
   const roomRef = useRef<LivekitClient.Room | null>(null);
   const videoTrackRef = useRef<LivekitClient.RemoteTrack | null>(null);
   const experimentStageRef = useRef<HTMLDivElement>(null);
-  const chatContainerRef = useRef<HTMLDivElement>(null);
   const notificationTimeoutsRef = useRef<Record<string, ReturnType<typeof setTimeout>>>({});
 
-  const stepsWindow = useDraggableWindow(experimentStageRef, (stage, win) => ({
-    x: stage.clientWidth - win.offsetWidth - WINDOW_DEFAULT_OFFSET,
-    y: 104,
-  }));
-  const chatWindow = useDraggableWindow(experimentStageRef, () => ({
-    x: WINDOW_DEFAULT_OFFSET,
-    y: 104,
-  }));
+  const stepsWindow = useDraggableWindow(experimentStageRef);
 
   useEffect(() => {
     document.title = "Remote Labs | Hamaralabs";
@@ -120,6 +90,19 @@ export default function ExperienceStage({ bookingId }: { bookingId: string }) {
       notificationTimeoutsRef.current = {};
     };
   }, []);
+
+  const getDefaultStepsWindowPosition = useCallback(() => {
+    const stage = experimentStageRef.current;
+    const win = stepsWindow.windowRef.current;
+    if (!stage || !win) {
+      return { x: STEPS_WINDOW_DEFAULT_OFFSET, y: 104 };
+    }
+    return stepsWindow.clampPosition({
+      x: stage.clientWidth - win.offsetWidth - STEPS_WINDOW_DEFAULT_OFFSET,
+      y: 104,
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [stepsWindow.clampPosition]);
 
   const unlockLandscapeOrientation = useCallback(() => {
     try {
@@ -198,182 +181,6 @@ export default function ExperienceStage({ bookingId }: { bookingId: string }) {
     };
   }, [bookingId, leaveExperience]);
 
-  // Fetch (and lazily create) the Chatwoot conversation for this booking once on mount.
-  useEffect(() => {
-    let cancelled = false;
-
-    fetch(`/api/experience/chat-session?bookingId=${encodeURIComponent(bookingId)}`, { cache: "no-store" })
-      .then((res) => res.json())
-      .then((session) => {
-        if (cancelled) return;
-        if (session.status === "active") {
-          setChatSession({
-            status: "active",
-            email: session.email,
-            name: session.name,
-            identifierHash: session.identifierHash,
-          });
-        } else {
-          setChatSession({ status: "inactive" });
-        }
-      })
-      .catch((err) => {
-        console.error("Failed to load chat session:", err);
-        if (!cancelled) setChatSession({ status: "inactive" });
-      });
-
-    return () => {
-      cancelled = true;
-    };
-  }, [bookingId]);
-
-  // Keep the real Chatwoot widget's on-screen box in sync with our placeholder panel.
-  //
-  // We deliberately do NOT move the widget's DOM node (`appendChild`) into our panel — moving
-  // an already-loaded <iframe> to a new parent forces the browser to reload it, and in testing
-  // against the real widget this reliably left it blank (the iframe's src was lost and it never
-  // recovered). Instead the widget stays wherever Chatwoot mounted it and we just override its
-  // position/size via CSS to exactly match our placeholder's on-screen rect — resizing/moving an
-  // iframe via CSS never triggers a reload, so this achieves the same "docked" look safely.
-  const positionChatWidget = useCallback(() => {
-    const holder = document.getElementById("cw-widget-holder");
-    const content = chatContainerRef.current;
-    if (!holder) return;
-
-    if (isChatWindowCollapsed || !content) {
-      holder.style.setProperty("display", "none", "important");
-      return;
-    }
-
-    const rect = content.getBoundingClientRect();
-    holder.style.setProperty("position", "fixed", "important");
-    holder.style.setProperty("top", `${rect.top}px`, "important");
-    holder.style.setProperty("left", `${rect.left}px`, "important");
-    holder.style.setProperty("right", "auto", "important");
-    holder.style.setProperty("bottom", "auto", "important");
-    holder.style.setProperty("width", `${rect.width}px`, "important");
-    holder.style.setProperty("height", `${rect.height}px`, "important");
-    holder.style.setProperty("max-width", "none", "important");
-    holder.style.setProperty("max-height", "none", "important");
-    holder.style.setProperty("display", "block", "important");
-
-    const iframe = document.getElementById("chatwoot_live_chat_widget");
-    if (iframe) {
-      iframe.style.setProperty("width", "100%", "important");
-      iframe.style.setProperty("height", "100%", "important");
-      iframe.style.setProperty("border", "none", "important");
-    }
-  }, [isChatWindowCollapsed]);
-
-  // Once the chat session is active, load the Chatwoot widget and open it.
-  useEffect(() => {
-    if (chatSession.status !== "active") return;
-    const session = chatSession;
-
-    let cancelled = false;
-
-    const dockWidget = () => {
-      const cw = (window as any).$chatwoot;
-      if (!cw || cancelled) return;
-      cw.setUser(session.email, {
-        email: session.email,
-        name: session.name,
-        identifier_hash: session.identifierHash,
-      });
-      cw.toggle("open");
-      positionChatWidget();
-
-      // Attach the greeting/conversation to the widget's OWN contact_inbox (identified by the
-      // source_id setUser just linked) so the widget can actually see it — a conversation minted
-      // on any other contact_inbox is invisible to it regardless of HMAC verification.
-      waitForSourceId().then((sourceId) => {
-        if (!sourceId || cancelled) return;
-        fetch(
-          `/api/experience/chat-session?bookingId=${encodeURIComponent(bookingId)}&sourceId=${encodeURIComponent(sourceId)}`,
-          { cache: "no-store" }
-        ).catch((err) => console.error("Failed to link Chatwoot conversation:", err));
-      });
-    };
-
-    if ((window as any).$chatwoot) {
-      dockWidget();
-      return;
-    }
-
-    (window as any).chatwootSettings = {
-      hideMessageBubble: true,
-      showPopoutButton: false,
-      type: "standard",
-      availableMessage: " ",
-      unavailableMessage: " ",
-    };
-
-    // Best-effort: these classes are believed to live inside Chatwoot's own cross-origin widget
-    // iframe (confirmed by inspecting the real widget), so a stylesheet in our top-level document
-    // cannot reach them — the browser's same-origin policy blocks styling into another origin's
-    // iframe content. Kept anyway in case a future widget version renders any of this outside the
-    // iframe; the listener below is what actually guarantees the chat can't be left closed.
-    if (!document.getElementById("chatwoot-no-close-style")) {
-      const style = document.createElement("style");
-      style.id = "chatwoot-no-close-style";
-      style.textContent = `
-        .chat-header--actions,
-        .close-button,
-        [data-testid="close-button"] {
-          display: none !important;
-        }
-      `;
-      document.head.appendChild(style);
-    }
-
-    window.addEventListener("chatwoot:ready", dockWidget, { once: true });
-
-    // Guard against inserting a second <script> tag (e.g. Strict Mode double-invoking this
-    // effect in dev) — each inserted <script> element re-executes on load, so without this
-    // chatwootSDK.run() would fire twice and spin up two separate widget instances.
-    if (!document.getElementById("chatwoot-sdk-script")) {
-      const script = document.createElement("script");
-      script.id = "chatwoot-sdk-script";
-      script.src = `${CHATWOOT_BASE_URL}/packs/js/sdk.js`;
-      script.async = true;
-      script.onload = () => {
-        (window as any).chatwootSDK?.run({
-          websiteToken: CHATWOOT_WEBSITE_TOKEN,
-          baseUrl: CHATWOOT_BASE_URL,
-        });
-      };
-      document.body.appendChild(script);
-    }
-
-    return () => {
-      cancelled = true;
-      window.removeEventListener("chatwoot:ready", dockWidget);
-    };
-  }, [bookingId, chatSession, positionChatWidget]);
-
-  // The widget shouldn't be left closed while the experience is open — reopen it immediately if
-  // the guest (or anything else) closes it.
-  useEffect(() => {
-    if (chatSession.status !== "active") return;
-    const handleClose = () => {
-      setTimeout(() => (window as any).$chatwoot?.toggle("open"), 0);
-    };
-    window.addEventListener("chatwoot:on-close", handleClose);
-    return () => window.removeEventListener("chatwoot:on-close", handleClose);
-  }, [chatSession.status]);
-
-  // Re-run positioning whenever the panel moves, is collapsed/expanded, or the window resizes.
-  useEffect(() => {
-    if (chatSession.status !== "active") return;
-    positionChatWidget();
-  }, [chatSession.status, chatWindow.position, isChatWindowCollapsed, positionChatWidget]);
-
-  useEffect(() => {
-    if (chatSession.status !== "active") return;
-    window.addEventListener("resize", positionChatWidget);
-    return () => window.removeEventListener("resize", positionChatWidget);
-  }, [chatSession.status, positionChatWidget]);
-
   useEffect(() => {
     const handleFullscreenChange = () => {
       const doc = document as any;
@@ -401,6 +208,22 @@ export default function ExperienceStage({ bookingId }: { bookingId: string }) {
       }
     });
   }, [lockLandscapeOrientation, requestStageFullscreen]);
+
+  useEffect(() => {
+    const frameId = requestAnimationFrame(() => {
+      stepsWindow.setPosition(getDefaultStepsWindowPosition());
+    });
+    return () => cancelAnimationFrame(frameId);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [getDefaultStepsWindowPosition]);
+
+  useEffect(() => {
+    const frameId = requestAnimationFrame(() => {
+      stepsWindow.setPosition((current) => stepsWindow.clampPosition(current));
+    });
+    return () => cancelAnimationFrame(frameId);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [stepsWindow.clampPosition, isStepsWindowCollapsed]);
 
   useEffect(() => {
     const mql = window.matchMedia("(orientation: portrait)");
@@ -491,20 +314,16 @@ export default function ExperienceStage({ bookingId }: { bookingId: string }) {
     return () => {
       teardownRoom();
       unlockLandscapeOrientation();
-      // The widget's DOM node lives in document.body, outside this component's tree, and Chatwoot
-      // keeps it mounted globally once loaded — hide it so it doesn't keep floating on whatever
-      // page the guest navigates to after leaving the experience.
-      document.getElementById("cw-widget-holder")?.style.setProperty("display", "none", "important");
     };
   }, [teardownRoom, unlockLandscapeOrientation]);
 
   const handleExitExperiment = useCallback(async () => {
     stepsWindow.cancelDrag();
-    chatWindow.cancelDrag();
     unlockLandscapeOrientation();
     await exitStageFullscreen();
     leaveExperience();
-  }, [chatWindow, exitStageFullscreen, leaveExperience, stepsWindow, unlockLandscapeOrientation]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [exitStageFullscreen, leaveExperience, unlockLandscapeOrientation, stepsWindow.cancelDrag]);
 
   async function handleActionTrigger(repoId: string, id_2?: string, holdFinalPosition?: boolean) {
     if (!repoId || runningStepId || repoId === "null") return;
@@ -678,46 +497,7 @@ export default function ExperienceStage({ bookingId }: { bookingId: string }) {
         )}
       </div>
 
-      <div
-        ref={chatWindow.windowRef}
-        className={
-          "absolute z-10 flex w-80 max-w-[calc(100vw-2rem)] flex-col rounded-2xl border border-white/15 bg-black/80 text-white shadow-2xl backdrop-blur " +
-          (chatWindow.isDragging ? "cursor-grabbing select-none" : "")
-        }
-        style={{ left: `${chatWindow.position.x}px`, top: `${chatWindow.position.y}px` }}
-      >
-        <div
-          className="flex cursor-grab items-center justify-between gap-3 border-b border-white/10 p-3"
-          {...chatWindow.dragHandlers}
-          aria-grabbed={chatWindow.isDragging}
-        >
-          <div>
-            <strong className="block text-sm">Live chat</strong>
-            <span className="text-xs text-white/50">Drag this window anywhere over the feed.</span>
-          </div>
-          <button
-            type="button"
-            onClick={() => setIsChatWindowCollapsed((prev) => !prev)}
-            className="shrink-0 rounded-lg px-3 py-1.5 text-xs font-medium text-white/80 hover:bg-white/10"
-          >
-            {isChatWindowCollapsed ? "Expand" : "Collapse"}
-          </button>
-        </div>
-
-        {!isChatWindowCollapsed && (
-          <div className="h-[420px] max-h-[60vh] overflow-hidden p-3">
-            {chatSession.status === "loading" && (
-              <div className="grid h-full place-items-center text-sm text-white/50">Loading chat…</div>
-            )}
-            {chatSession.status === "inactive" && (
-              <div className="grid h-full place-items-center px-4 text-center text-sm text-white/50">
-                Chat is not available right now.
-              </div>
-            )}
-            {chatSession.status === "active" && <div ref={chatContainerRef} className="h-full w-full" />}
-          </div>
-        )}
-      </div>
+      <ChatWindow stageRef={experimentStageRef} bookingId={bookingId} />
 
       {isPortrait && (
         <div className="absolute inset-0 z-30 grid place-items-center bg-black/95 px-6 text-center">
