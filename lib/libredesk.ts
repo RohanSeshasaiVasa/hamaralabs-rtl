@@ -6,7 +6,7 @@ const LD_INBOX_SECRET = process.env.LIBREDESK_INBOX_SECRET || "";
 const LD_API_KEY = process.env.LIBREDESK_API_KEY || "";
 const LD_API_SECRET = process.env.LIBREDESK_API_SECRET || "";
 
-const GREETING = "Hi! You're through to the support team. What can we help you with?";
+const GREETING = "Hi! We are here to guide you ! \n Execute each step sequentially. Run the first step, wait for our command in the chat, then proceed to the next step. Repeat until complete.";
 
 /**
  * Keep reusing a conversation even after an agent resolves or closes it, so a returning
