@@ -34,7 +34,7 @@ export default function BuyPage() {
 
   const paymentPortal = process.env.NEXT_PUBLIC_PAYMENT_PORTAL || "https://hamaralabs.com";
   const merchantId = "${merchantId}";
-  const siteUrl = process.env.NEXT_PUBLIC_SITE_URL || "https://hamaralabs.com";
+  const siteUrl = process.env.NEXT_PUBLIC_SITE_URL || "https://rtl.hamaralabs.com";
 
   const merchantTransactionId = useMemo(() => `MT${Date.now()}`, []);
   const merchantUserId = useMemo(() => `MUI${Date.now()}`, []);
