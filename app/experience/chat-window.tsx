@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState, type RefObject } from "react";
+import { createPortal } from "react-dom";
 import { useDraggableWindow } from "./use-draggable-window";
 
 type ChatAttachment = {
@@ -108,6 +109,7 @@ export default function ChatWindow({
   const [input, setInput] = useState("");
   const [isReady, setIsReady] = useState(false);
   const [isRefreshing, setIsRefreshing] = useState(false);
+  const [previewImage, setPreviewImage] = useState<{ url: string; name: string } | null>(null);
 
   const sessionTokenRef = useRef<string | null>(null);
   const conversationUUIDRef = useRef<string | null>(null);
@@ -289,6 +291,15 @@ export default function ChatWindow({
     window.addEventListener("focus", handleFocus);
     return () => window.removeEventListener("focus", handleFocus);
   }, [markSeen]);
+
+  useEffect(() => {
+    if (!previewImage) return;
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setPreviewImage(null);
+    };
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [previewImage]);
 
   // Default position: bottom-left, so it doesn't start out overlapping the guided-steps
   // window (which defaults to top-right).
@@ -559,13 +570,18 @@ export default function ChatWindow({
                 )}
                 {m.attachments.map((att) =>
                   att.contentType.startsWith("image/") ? (
-                    <a key={att.id} href={att.url} target="_blank" rel="noopener noreferrer" className="mt-1 block">
+                    <button
+                      key={att.id}
+                      type="button"
+                      onClick={() => setPreviewImage({ url: att.url, name: att.name })}
+                      className="mt-1 block cursor-zoom-in"
+                    >
                       <img
                         src={att.thumbnailUrl || att.url}
                         alt={att.name}
                         className="max-h-48 max-w-full rounded-xl border border-white/15 object-cover"
                       />
-                    </a>
+                    </button>
                   ) : (
                     <a
                       key={att.id}
@@ -679,6 +695,37 @@ export default function ChatWindow({
           ))}
         </>
       )}
+
+      {previewImage &&
+        createPortal(
+          // Rendered into document.body via a portal rather than inline: the chat window's own
+          // container has `backdrop-blur`, and a backdrop-filter (like transform/filter/
+          // will-change) on an ancestor creates a containing block for `position: fixed`
+          // descendants — so despite `fixed inset-0`, this would otherwise be confined to the
+          // chat window's own box instead of covering the real viewport.
+          <div
+            className="fixed inset-0 z-50 flex items-center justify-center bg-black/90 p-6"
+            onClick={() => setPreviewImage(null)}
+          >
+            <button
+              type="button"
+              onClick={() => setPreviewImage(null)}
+              aria-label="Close preview"
+              className="absolute right-4 top-4 rounded-full bg-white/10 p-2.5 text-white hover:bg-white/20"
+            >
+              <svg viewBox="0 0 24 24" fill="none" className="size-5">
+                <path d="M6 6l12 12M18 6L6 18" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
+              </svg>
+            </button>
+            <img
+              src={previewImage.url}
+              alt={previewImage.name}
+              onClick={(e) => e.stopPropagation()}
+              className="max-h-full max-w-full rounded-lg object-contain"
+            />
+          </div>,
+          document.body
+        )}
     </div>
   );
 }
