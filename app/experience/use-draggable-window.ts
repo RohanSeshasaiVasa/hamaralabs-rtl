@@ -25,6 +25,10 @@ export function useDraggableWindow(boundsRef: RefObject<HTMLElement | null>) {
   const dragRef = useRef<DragState | null>(null);
   const [position, setPosition] = useState<Position>({ x: MIN_OFFSET, y: MIN_OFFSET });
   const [isDragging, setIsDragging] = useState(false);
+  // Once the user has actually moved/resized the window, stop re-snapping it to a "default"
+  // position on later layout changes (e.g. orientation rotation) — that would undo their
+  // manual placement, which is worse than leaving it slightly off after a resize.
+  const hasMovedRef = useRef(false);
 
   const clampPosition = useCallback(
     (pos: Position): Position => {
@@ -63,6 +67,7 @@ export function useDraggableWindow(boundsRef: RefObject<HTMLElement | null>) {
         originX: position.x,
         originY: position.y,
       };
+      hasMovedRef.current = true;
       setIsDragging(true);
     },
     [position.x, position.y]
@@ -179,6 +184,7 @@ export function useDraggableWindow(boundsRef: RefObject<HTMLElement | null>) {
     isDragging,
     clampPosition,
     cancelDrag: stopDrag,
+    hasMovedRef,
     dragHandlers: {
       onPointerDown: handlePointerDown,
       onPointerMove: handlePointerMove,

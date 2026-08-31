@@ -51,6 +51,11 @@ export default function ExperienceStage({ bookingId }: { bookingId: string }) {
   const [notifications, setNotifications] = useState<Notification[]>([]);
   const [isFeedReady, setIsFeedReady] = useState(false);
   const [isPortrait, setIsPortrait] = useState(false);
+  const [isFullscreen, setIsFullscreen] = useState(() => {
+    if (typeof document === "undefined") return false;
+    const doc = document as any;
+    return Boolean(doc.fullscreenElement || doc.webkitFullscreenElement || doc.mozFullScreenElement || doc.msFullscreenElement);
+  });
 
   const videoRef = useRef<HTMLVideoElement>(null);
   const roomRef = useRef<LivekitClient.Room | null>(null);
@@ -130,6 +135,12 @@ export default function ExperienceStage({ bookingId }: { bookingId: string }) {
 
     try {
       await requestFullscreen.call(stage);
+      // Set directly rather than relying solely on the fullscreenchange event: when fullscreen
+      // was already entered on a previous page (e.g. document.documentElement, before a
+      // client-side navigation) and this just reassigns the fullscreen element to the stage div,
+      // some browsers don't dispatch a fresh fullscreenchange event, so the listener alone can
+      // never sync state to true.
+      setIsFullscreen(true);
       return true;
     } catch {
       return false;
@@ -142,6 +153,7 @@ export default function ExperienceStage({ bookingId }: { bookingId: string }) {
     if (!exitFullscreen) return;
     try {
       await exitFullscreen.call(document);
+      setIsFullscreen(false);
     } catch {
       // ignore
     }
@@ -181,15 +193,18 @@ export default function ExperienceStage({ bookingId }: { bookingId: string }) {
     };
   }, [bookingId, leaveExperience]);
 
+  // Exiting fullscreen (Esc, swipe-out, browser UI, or the toggle button below) no longer
+  // leaves the experience — it's just a display mode now. Only the explicit Exit button (or
+  // the booking being marked completed) navigates away.
   useEffect(() => {
     const handleFullscreenChange = () => {
       const doc = document as any;
       const fullscreenElement =
         doc.fullscreenElement || doc.webkitFullscreenElement || doc.mozFullScreenElement || doc.msFullscreenElement;
 
+      setIsFullscreen(Boolean(fullscreenElement));
       if (!fullscreenElement) {
         unlockLandscapeOrientation();
-        leaveExperience();
       }
     };
 
@@ -199,9 +214,24 @@ export default function ExperienceStage({ bookingId }: { bookingId: string }) {
       document.removeEventListener("fullscreenchange", handleFullscreenChange);
       document.removeEventListener("webkitfullscreenchange", handleFullscreenChange);
     };
-  }, [leaveExperience, unlockLandscapeOrientation]);
+  }, [unlockLandscapeOrientation]);
 
+  // Enters fullscreen by default on arrival. If fullscreen was already requested on a previous
+  // page (the bookings list requests it on document.documentElement before navigating here, to
+  // stay inside the click's user-gesture window), skip re-requesting it on the stage div —
+  // requesting fullscreen again while already fullscreen pushes a second level onto the
+  // browser's fullscreen stack, and a single Exit click would then only pop back to
+  // documentElement (still fullscreen) instead of leaving fullscreen entirely.
   useEffect(() => {
+    const doc = document as any;
+    const alreadyFullscreen = Boolean(
+      doc.fullscreenElement || doc.webkitFullscreenElement || doc.mozFullScreenElement || doc.msFullscreenElement
+    );
+    if (alreadyFullscreen) {
+      setIsFullscreen(true);
+      lockLandscapeOrientation();
+      return;
+    }
     requestStageFullscreen().then((isFullscreenActive) => {
       if (isFullscreenActive) {
         lockLandscapeOrientation();
@@ -209,11 +239,35 @@ export default function ExperienceStage({ bookingId }: { bookingId: string }) {
     });
   }, [lockLandscapeOrientation, requestStageFullscreen]);
 
+  const toggleFullscreen = useCallback(async () => {
+    if (isFullscreen) {
+      await exitStageFullscreen();
+      return;
+    }
+    const active = await requestStageFullscreen();
+    if (active) {
+      lockLandscapeOrientation();
+    }
+  }, [exitStageFullscreen, isFullscreen, lockLandscapeOrientation, requestStageFullscreen]);
+
+  // Re-apply the right-aligned default position not just on mount but whenever the stage's
+  // actual size settles later too — on mobile, entering fullscreen + locking landscape can
+  // rotate the viewport *after* this first runs, so a mount-only calculation can be measured
+  // against stale (pre-rotation) dimensions and never get corrected. Skipped once the user has
+  // manually dragged the window, so this never fights their own placement.
   useEffect(() => {
-    const frameId = requestAnimationFrame(() => {
+    const applyDefault = () => {
+      if (stepsWindow.hasMovedRef.current) return;
       stepsWindow.setPosition(getDefaultStepsWindowPosition());
-    });
-    return () => cancelAnimationFrame(frameId);
+    };
+    const frameId = requestAnimationFrame(applyDefault);
+    window.addEventListener("resize", applyDefault);
+    window.addEventListener("orientationchange", applyDefault);
+    return () => {
+      cancelAnimationFrame(frameId);
+      window.removeEventListener("resize", applyDefault);
+      window.removeEventListener("orientationchange", applyDefault);
+    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [getDefaultStepsWindowPosition]);
 
@@ -398,6 +452,13 @@ export default function ExperienceStage({ bookingId }: { bookingId: string }) {
         <div className="flex items-center gap-2">
           <button
             type="button"
+            onClick={toggleFullscreen}
+            className="rounded-xl bg-white/10 px-4 py-2 text-sm font-medium text-white backdrop-blur transition hover:bg-white/20"
+          >
+            {isFullscreen ? "Exit full screen" : "Enter full screen mode"}
+          </button>
+          <button
+            type="button"
             onClick={startStream}
             className="rounded-xl bg-white/10 px-4 py-2 text-sm font-medium text-white backdrop-blur transition hover:bg-white/20"
           >
@@ -445,7 +506,7 @@ export default function ExperienceStage({ bookingId }: { bookingId: string }) {
         style={{ left: `${stepsWindow.position.x}px`, top: `${stepsWindow.position.y}px` }}
       >
         <div
-          className="flex cursor-grab items-center justify-between gap-3 border-b border-white/10 p-3"
+          className="flex cursor-grab touch-none items-center justify-between gap-3 border-b border-white/10 p-3"
           {...stepsWindow.dragHandlers}
           aria-grabbed={stepsWindow.isDragging}
         >

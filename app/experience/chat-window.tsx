@@ -3,12 +3,21 @@
 import { useCallback, useEffect, useRef, useState, type RefObject } from "react";
 import { useDraggableWindow } from "./use-draggable-window";
 
+type ChatAttachment = {
+  id: string;
+  name: string;
+  contentType: string;
+  url: string;
+  thumbnailUrl?: string;
+};
+
 type ChatMessage = {
   id: string;
   html: string;
   mine: boolean;
   at: Date;
   conversation?: string;
+  attachments: ChatAttachment[];
 };
 
 const PING_INTERVAL_MS = 30_000;
@@ -21,20 +30,52 @@ const DEFAULT_SIZE = { width: 320, height: 420 };
 type Corner = "nw" | "ne" | "sw" | "se";
 const CORNERS: Corner[] = ["nw", "ne", "sw", "se"];
 
+// Libredesk can return attachment URLs pointing at the backend's own internal address (e.g.
+// http://localhost:9000/uploads/...) rather than its public domain — verified directly: the
+// as-given URL fails to connect from outside, while swapping in the real public origin and
+// keeping the signed path/query intact loads the actual file. Rewrite the origin only, since
+// the signature is computed over the path/query, not the host.
+function rewriteMediaUrl(url: string | undefined, baseURL: string): string | undefined {
+  if (!url || !baseURL) return url;
+  try {
+    const rewritten = new URL(url);
+    const base = new URL(baseURL);
+    rewritten.protocol = base.protocol;
+    // Assigning `.host` alone doesn't clear a port already present on the URL being rewritten
+    // when the new host has none (a real WHATWG URL quirk, confirmed directly: it silently
+    // keeps the old :9000) — hostname and port must be set separately to actually replace both.
+    rewritten.hostname = base.hostname;
+    rewritten.port = base.port;
+    return rewritten.toString();
+  } catch {
+    return url;
+  }
+}
+
 // The widget API's message shape nests the sender as `author.type` ("agent" | "contact"),
 // not a top-level `sender_type`/`type` field (that only exists on the *admin* messages
 // endpoint's response shape). Reading the wrong field here means every message silently
 // evaluates as neither contact nor agent — sender/name detection must go through `author`.
-function normalizeMessage(raw: any, conversationUUID: string): ChatMessage {
+function normalizeMessage(raw: any, conversationUUID: string, baseURL: string): ChatMessage {
   const author = raw.author || {};
   const sender = author.type || raw.sender_type || raw.type || raw.sender || "";
   const mine = /contact|visitor/i.test(sender) && !/agent/i.test(sender);
+  const attachments: ChatAttachment[] = Array.isArray(raw.attachments)
+    ? raw.attachments.map((a: any) => ({
+        id: a.uuid || a.id || `${a.name || "file"}-${Math.random()}`,
+        name: a.name || a.filename || "attachment",
+        contentType: a.content_type || "",
+        url: rewriteMediaUrl(a.url, baseURL) || a.url,
+        thumbnailUrl: rewriteMediaUrl(a.thumbnail_url, baseURL),
+      }))
+    : [];
   return {
     id: raw.uuid || raw.id || `${raw.created_at}-${Math.random()}`,
     html: raw.content ?? raw.message ?? "",
     mine,
     at: raw.created_at ? new Date(raw.created_at) : new Date(),
     conversation: raw.conversation_uuid || conversationUUID,
+    attachments,
   };
 }
 
@@ -45,7 +86,7 @@ export default function ChatWindow({
   stageRef: RefObject<HTMLDivElement | null>;
   bookingId: string;
 }) {
-  const { windowRef, position, setPosition, isDragging, clampPosition, dragHandlers } =
+  const { windowRef, position, setPosition, isDragging, clampPosition, dragHandlers, hasMovedRef } =
     useDraggableWindow(stageRef);
 
   const [size, setSize] = useState(DEFAULT_SIZE);
@@ -79,11 +120,13 @@ export default function ChatWindow({
   const pingIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const typingTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const logRef = useRef<HTMLDivElement>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+  const [isUploading, setIsUploading] = useState(false);
 
   const appendMessage = useCallback((raw: any) => {
     const conversationUUID = conversationUUIDRef.current;
     if (!conversationUUID) return;
-    const m = normalizeMessage(raw, conversationUUID);
+    const m = normalizeMessage(raw, conversationUUID, baseURLRef.current || "");
     if (m.conversation && m.conversation !== conversationUUID) return;
     if (seenIdsRef.current.has(m.id)) return;
     seenIdsRef.current.add(m.id);
@@ -249,19 +292,35 @@ export default function ChatWindow({
 
   // Default position: bottom-left, so it doesn't start out overlapping the guided-steps
   // window (which defaults to top-right).
-  useEffect(() => {
+  const getDefaultPosition = useCallback(() => {
     const stage = stageRef.current;
     const win = windowRef.current;
-    const defaultPosition =
-      stage && win
-        ? { x: WINDOW_OFFSET, y: stage.clientHeight - win.offsetHeight - WINDOW_OFFSET }
-        : { x: WINDOW_OFFSET, y: WINDOW_OFFSET };
-    const frameId = requestAnimationFrame(() => {
-      setPosition(clampPosition(defaultPosition));
-    });
-    return () => cancelAnimationFrame(frameId);
+    return stage && win
+      ? { x: WINDOW_OFFSET, y: stage.clientHeight - win.offsetHeight - WINDOW_OFFSET }
+      : { x: WINDOW_OFFSET, y: WINDOW_OFFSET };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  // Re-apply the default position not just on mount but whenever the stage's actual size
+  // settles later too — on mobile, entering fullscreen + locking landscape can rotate the
+  // viewport *after* this first runs, so a mount-only calculation can be measured against
+  // stale (pre-rotation) dimensions and never get corrected. Skipped once the user has
+  // manually dragged or resized the window, so this never fights their own placement.
+  useEffect(() => {
+    const applyDefault = () => {
+      if (hasMovedRef.current) return;
+      setPosition(clampPosition(getDefaultPosition()));
+    };
+    const frameId = requestAnimationFrame(applyDefault);
+    window.addEventListener("resize", applyDefault);
+    window.addEventListener("orientationchange", applyDefault);
+    return () => {
+      cancelAnimationFrame(frameId);
+      window.removeEventListener("resize", applyDefault);
+      window.removeEventListener("orientationchange", applyDefault);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [getDefaultPosition]);
 
   useEffect(() => {
     const frameId = requestAnimationFrame(() => {
@@ -305,6 +364,7 @@ export default function ChatWindow({
         startPosX: position.x,
         startPosY: position.y,
       };
+      hasMovedRef.current = true;
       setIsResizing(true);
       event.currentTarget.setPointerCapture?.(event.pointerId);
     },
@@ -401,6 +461,37 @@ export default function ChatWindow({
     }
   };
 
+  const handleFileSelected = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    e.target.value = ""; // reset so choosing the same file again still fires onChange
+    const conversationUUID = conversationUUIDRef.current;
+    if (!file || !conversationUUID) return;
+
+    setIsUploading(true);
+    try {
+      const formData = new FormData();
+      formData.append("conversation_uuid", conversationUUID);
+      formData.append("files", file);
+
+      // POST /api/v1/widget/media/upload creates the message itself (with the file attached)
+      // in one call — it's not a separate "upload then reference the id" step.
+      const res = await fetch("/api/experience/chat-media-proxy", {
+        method: "POST",
+        headers: headers(), // Authorization + inbox id only — no Content-Type, so the browser
+        // sets its own multipart boundary for the FormData body.
+        body: formData,
+      });
+      const json = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(`upload failed: ${res.status} ${JSON.stringify(json)}`);
+      appendMessage(json.data ?? json);
+    } catch (err) {
+      console.error("[libredesk]", err);
+      setStatus("File not sent. Try again.");
+    } finally {
+      setIsUploading(false);
+    }
+  };
+
   return (
     <div
       ref={windowRef}
@@ -416,7 +507,10 @@ export default function ChatWindow({
         height: isCollapsed ? undefined : `${size.height}px`,
       }}
     >
-      <div className="flex cursor-grab items-center justify-between gap-3 border-b border-white/10 p-3" {...dragHandlers}>
+      <div
+        className="flex cursor-grab touch-none items-center justify-between gap-3 border-b border-white/10 p-3"
+        {...dragHandlers}
+      >
         <div>
           <strong className="block text-sm">Chat with support</strong>
           <span className="text-xs text-white/50">Drag this window anywhere over the feed.</span>
@@ -457,10 +551,42 @@ export default function ChatWindow({
                 key={m.id}
                 className={"flex max-w-[85%] flex-col " + (m.mine ? "self-end items-end" : "self-start items-start")}
               >
-                <div
-                  className={"rounded-2xl px-3 py-2 text-sm " + (m.mine ? "bg-white text-black" : "bg-white/10 text-white")}
-                  dangerouslySetInnerHTML={{ __html: m.html }}
-                />
+                {m.html && (
+                  <div
+                    className={"rounded-2xl px-3 py-2 text-sm " + (m.mine ? "bg-white text-black" : "bg-white/10 text-white")}
+                    dangerouslySetInnerHTML={{ __html: m.html }}
+                  />
+                )}
+                {m.attachments.map((att) =>
+                  att.contentType.startsWith("image/") ? (
+                    <a key={att.id} href={att.url} target="_blank" rel="noopener noreferrer" className="mt-1 block">
+                      <img
+                        src={att.thumbnailUrl || att.url}
+                        alt={att.name}
+                        className="max-h-48 max-w-full rounded-xl border border-white/15 object-cover"
+                      />
+                    </a>
+                  ) : (
+                    <a
+                      key={att.id}
+                      href={att.url}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="mt-1 flex max-w-full items-center gap-2 rounded-xl border border-white/15 bg-white/5 px-3 py-2 text-xs text-white/80 hover:bg-white/10"
+                    >
+                      <svg viewBox="0 0 24 24" fill="none" className="size-3.5 shrink-0">
+                        <path
+                          d="M8 12l4-4a4 4 0 1 1 5.66 5.66l-7.07 7.07a3 3 0 0 1-4.24-4.24l7.07-7.07"
+                          stroke="currentColor"
+                          strokeWidth="1.6"
+                          strokeLinecap="round"
+                          strokeLinejoin="round"
+                        />
+                      </svg>
+                      <span className="truncate">{att.name}</span>
+                    </a>
+                  )
+                )}
                 <time className="mt-1 text-[10px] text-white/40">
                   {m.at.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}
                 </time>
@@ -472,6 +598,30 @@ export default function ChatWindow({
           {status && <div className="px-3 pb-2 text-xs text-amber-300">{status}</div>}
 
           <form onSubmit={handleSend} className="flex items-end gap-2 border-t border-white/10 p-3">
+            <input
+              ref={fileInputRef}
+              type="file"
+              accept="image/*,application/pdf"
+              className="hidden"
+              onChange={handleFileSelected}
+            />
+            <button
+              type="button"
+              onClick={() => fileInputRef.current?.click()}
+              disabled={!isReady || isUploading}
+              aria-label="Attach a file"
+              className="shrink-0 rounded-xl border border-white/15 bg-black/40 p-2.5 text-white/80 hover:bg-white/10 disabled:opacity-40"
+            >
+              <svg viewBox="0 0 24 24" fill="none" className={"size-4 " + (isUploading ? "animate-pulse" : "")}>
+                <path
+                  d="M8 12l4-4a4 4 0 1 1 5.66 5.66l-7.07 7.07a3 3 0 0 1-4.24-4.24l7.07-7.07"
+                  stroke="currentColor"
+                  strokeWidth="1.6"
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                />
+              </svg>
+            </button>
             <textarea
               rows={1}
               value={input}
@@ -503,7 +653,10 @@ export default function ChatWindow({
               onPointerUp={handleResizePointerUp}
               onPointerCancel={handleResizePointerUp}
               className={
-                "absolute size-5 touch-none " +
+                // A larger touch-none hit box than the visible bracket: 20px is well below
+                // the ~40px minimum reliable finger-touch target, so the visible indicator
+                // stays small while the actual grab area is generous enough for mobile.
+                "absolute size-8 touch-none " +
                 (corner === "nw" ? "top-0 left-0 cursor-nwse-resize " : "") +
                 (corner === "ne" ? "top-0 right-0 cursor-nesw-resize " : "") +
                 (corner === "sw" ? "bottom-0 left-0 cursor-nesw-resize " : "") +
@@ -515,11 +668,11 @@ export default function ChatWindow({
             >
               <span
                 className={
-                  "absolute size-3 rounded-sm border-white/50 " +
-                  (corner === "nw" ? "top-1 left-1 border-l-2 border-t-2 " : "") +
-                  (corner === "ne" ? "top-1 right-1 border-r-2 border-t-2 " : "") +
-                  (corner === "sw" ? "bottom-1 left-1 border-b-2 border-l-2 " : "") +
-                  (corner === "se" ? "bottom-1 right-1 border-b-2 border-r-2 " : "")
+                  "absolute size-3.5 rounded-sm border-white/50 " +
+                  (corner === "nw" ? "top-1.5 left-1.5 border-l-2 border-t-2 " : "") +
+                  (corner === "ne" ? "top-1.5 right-1.5 border-r-2 border-t-2 " : "") +
+                  (corner === "sw" ? "bottom-1.5 left-1.5 border-b-2 border-l-2 " : "") +
+                  (corner === "se" ? "bottom-1.5 right-1.5 border-b-2 border-r-2 " : "")
                 }
               />
             </div>
