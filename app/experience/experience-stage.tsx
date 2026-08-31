@@ -3,6 +3,8 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import * as LivekitClient from "livekit-client";
+import { useDraggableWindow } from "./use-draggable-window";
+import ChatWindow from "./chat-window";
 
 const EXPERIMENT = {
   id: "know-voltage",
@@ -30,9 +32,6 @@ const actionSteps: Array<{
     id_2: "exp-check-voltage-camera/read-multimeter-values",
     hold_final_position: true,
   },
-  { id: "exp-check-voltage/switch-off", label: "Switch off the power supply." },
-  { id: "exp-check-voltage/dial-back-multimeter", label: "Dial back the multimeter." },
-  { id: "exp-check-voltage/unplug", label: "Take the leads off the socket." },
 ];
 
 const LIVEKIT_SERVER_URL = "wss://livestream.hamaralabs.com";
@@ -40,16 +39,7 @@ const LIVEKIT_TOKEN_ENDPOINT = "https://livestream.hamaralabs.com/token?identity
 
 const STEPS_WINDOW_DEFAULT_OFFSET = 24;
 
-type Notification = { id: string; message: string; type: "success" | "error" };
-type Position = { x: number; y: number };
-type DragState = {
-  pointerId: number | null;
-  touchId: number | null;
-  startX: number;
-  startY: number;
-  originX: number;
-  originY: number;
-};
+type Notification = { id: string; message: string };
 
 const COMPLETION_POLL_INTERVAL_MS = 10_000;
 
@@ -58,22 +48,22 @@ export default function ExperienceStage({ bookingId }: { bookingId: string }) {
 
   const [runningStepId, setRunningStepId] = useState<string | null>(null);
   const [isStepsWindowCollapsed, setIsStepsWindowCollapsed] = useState(false);
-  const [isDraggingStepsWindow, setIsDraggingStepsWindow] = useState(false);
   const [notifications, setNotifications] = useState<Notification[]>([]);
-  const [stepsWindowPosition, setStepsWindowPosition] = useState<Position>({
-    x: STEPS_WINDOW_DEFAULT_OFFSET,
-    y: 104,
-  });
   const [isFeedReady, setIsFeedReady] = useState(false);
   const [isPortrait, setIsPortrait] = useState(false);
+  const [isFullscreen, setIsFullscreen] = useState(() => {
+    if (typeof document === "undefined") return false;
+    const doc = document as any;
+    return Boolean(doc.fullscreenElement || doc.webkitFullscreenElement || doc.mozFullScreenElement || doc.msFullscreenElement);
+  });
 
   const videoRef = useRef<HTMLVideoElement>(null);
   const roomRef = useRef<LivekitClient.Room | null>(null);
   const videoTrackRef = useRef<LivekitClient.RemoteTrack | null>(null);
   const experimentStageRef = useRef<HTMLDivElement>(null);
-  const stepsWindowRef = useRef<HTMLDivElement>(null);
-  const stepsWindowDragRef = useRef<DragState | null>(null);
   const notificationTimeoutsRef = useRef<Record<string, ReturnType<typeof setTimeout>>>({});
+
+  const stepsWindow = useDraggableWindow(experimentStageRef);
 
   useEffect(() => {
     document.title = "Remote Labs | Hamaralabs";
@@ -89,9 +79,9 @@ export default function ExperienceStage({ bookingId }: { bookingId: string }) {
   }, []);
 
   const showNotification = useCallback(
-    (message: string, type: "success" | "error" = "success") => {
+    (message: string) => {
       const notificationId = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
-      setNotifications((current) => [...current.slice(-2), { id: notificationId, message, type }]);
+      setNotifications((current) => [...current.slice(-2), { id: notificationId, message }]);
       notificationTimeoutsRef.current[notificationId] = setTimeout(() => {
         dismissNotification(notificationId);
       }, 4200);
@@ -106,32 +96,18 @@ export default function ExperienceStage({ bookingId }: { bookingId: string }) {
     };
   }, []);
 
-  const clampStepsWindowPosition = useCallback((position: Position): Position => {
+  const getDefaultStepsWindowPosition = useCallback(() => {
     const stage = experimentStageRef.current;
-    const stepsWindow = stepsWindowRef.current;
-    if (!stage || !stepsWindow) return position;
-
-    const minOffset = 16;
-    const maxX = Math.max(minOffset, stage.clientWidth - stepsWindow.offsetWidth - minOffset);
-    const maxY = Math.max(minOffset, stage.clientHeight - stepsWindow.offsetHeight - minOffset);
-
-    return {
-      x: Math.min(Math.max(position.x, minOffset), maxX),
-      y: Math.min(Math.max(position.y, minOffset), maxY),
-    };
-  }, []);
-
-  const getDefaultStepsWindowPosition = useCallback((): Position => {
-    const stage = experimentStageRef.current;
-    const stepsWindow = stepsWindowRef.current;
-    if (!stage || !stepsWindow) {
+    const win = stepsWindow.windowRef.current;
+    if (!stage || !win) {
       return { x: STEPS_WINDOW_DEFAULT_OFFSET, y: 104 };
     }
-    return clampStepsWindowPosition({
-      x: stage.clientWidth - stepsWindow.offsetWidth - STEPS_WINDOW_DEFAULT_OFFSET,
+    return stepsWindow.clampPosition({
+      x: stage.clientWidth - win.offsetWidth - STEPS_WINDOW_DEFAULT_OFFSET,
       y: 104,
     });
-  }, [clampStepsWindowPosition]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [stepsWindow.clampPosition]);
 
   const unlockLandscapeOrientation = useCallback(() => {
     try {
@@ -159,6 +135,12 @@ export default function ExperienceStage({ bookingId }: { bookingId: string }) {
 
     try {
       await requestFullscreen.call(stage);
+      // Set directly rather than relying solely on the fullscreenchange event: when fullscreen
+      // was already entered on a previous page (e.g. document.documentElement, before a
+      // client-side navigation) and this just reassigns the fullscreen element to the stage div,
+      // some browsers don't dispatch a fresh fullscreenchange event, so the listener alone can
+      // never sync state to true.
+      setIsFullscreen(true);
       return true;
     } catch {
       return false;
@@ -171,6 +153,7 @@ export default function ExperienceStage({ bookingId }: { bookingId: string }) {
     if (!exitFullscreen) return;
     try {
       await exitFullscreen.call(document);
+      setIsFullscreen(false);
     } catch {
       // ignore
     }
@@ -210,15 +193,18 @@ export default function ExperienceStage({ bookingId }: { bookingId: string }) {
     };
   }, [bookingId, leaveExperience]);
 
+  // Exiting fullscreen (Esc, swipe-out, browser UI, or the toggle button below) no longer
+  // leaves the experience — it's just a display mode now. Only the explicit Exit button (or
+  // the booking being marked completed) navigates away.
   useEffect(() => {
     const handleFullscreenChange = () => {
       const doc = document as any;
       const fullscreenElement =
         doc.fullscreenElement || doc.webkitFullscreenElement || doc.mozFullScreenElement || doc.msFullscreenElement;
 
+      setIsFullscreen(Boolean(fullscreenElement));
       if (!fullscreenElement) {
         unlockLandscapeOrientation();
-        leaveExperience();
       }
     };
 
@@ -228,9 +214,24 @@ export default function ExperienceStage({ bookingId }: { bookingId: string }) {
       document.removeEventListener("fullscreenchange", handleFullscreenChange);
       document.removeEventListener("webkitfullscreenchange", handleFullscreenChange);
     };
-  }, [leaveExperience, unlockLandscapeOrientation]);
+  }, [unlockLandscapeOrientation]);
 
+  // Enters fullscreen by default on arrival. If fullscreen was already requested on a previous
+  // page (the bookings list requests it on document.documentElement before navigating here, to
+  // stay inside the click's user-gesture window), skip re-requesting it on the stage div —
+  // requesting fullscreen again while already fullscreen pushes a second level onto the
+  // browser's fullscreen stack, and a single Exit click would then only pop back to
+  // documentElement (still fullscreen) instead of leaving fullscreen entirely.
   useEffect(() => {
+    const doc = document as any;
+    const alreadyFullscreen = Boolean(
+      doc.fullscreenElement || doc.webkitFullscreenElement || doc.mozFullScreenElement || doc.msFullscreenElement
+    );
+    if (alreadyFullscreen) {
+      setIsFullscreen(true);
+      lockLandscapeOrientation();
+      return;
+    }
     requestStageFullscreen().then((isFullscreenActive) => {
       if (isFullscreenActive) {
         lockLandscapeOrientation();
@@ -238,27 +239,45 @@ export default function ExperienceStage({ bookingId }: { bookingId: string }) {
     });
   }, [lockLandscapeOrientation, requestStageFullscreen]);
 
+  const toggleFullscreen = useCallback(async () => {
+    if (isFullscreen) {
+      await exitStageFullscreen();
+      return;
+    }
+    const active = await requestStageFullscreen();
+    if (active) {
+      lockLandscapeOrientation();
+    }
+  }, [exitStageFullscreen, isFullscreen, lockLandscapeOrientation, requestStageFullscreen]);
+
+  // Re-apply the right-aligned default position not just on mount but whenever the stage's
+  // actual size settles later too — on mobile, entering fullscreen + locking landscape can
+  // rotate the viewport *after* this first runs, so a mount-only calculation can be measured
+  // against stale (pre-rotation) dimensions and never get corrected. Skipped once the user has
+  // manually dragged the window, so this never fights their own placement.
   useEffect(() => {
-    const frameId = requestAnimationFrame(() => {
-      setStepsWindowPosition(getDefaultStepsWindowPosition());
-    });
-    return () => cancelAnimationFrame(frameId);
+    const applyDefault = () => {
+      if (stepsWindow.hasMovedRef.current) return;
+      stepsWindow.setPosition(getDefaultStepsWindowPosition());
+    };
+    const frameId = requestAnimationFrame(applyDefault);
+    window.addEventListener("resize", applyDefault);
+    window.addEventListener("orientationchange", applyDefault);
+    return () => {
+      cancelAnimationFrame(frameId);
+      window.removeEventListener("resize", applyDefault);
+      window.removeEventListener("orientationchange", applyDefault);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [getDefaultStepsWindowPosition]);
 
   useEffect(() => {
     const frameId = requestAnimationFrame(() => {
-      setStepsWindowPosition((current) => clampStepsWindowPosition(current));
+      stepsWindow.setPosition((current) => stepsWindow.clampPosition(current));
     });
     return () => cancelAnimationFrame(frameId);
-  }, [clampStepsWindowPosition, isStepsWindowCollapsed]);
-
-  useEffect(() => {
-    const handleResize = () => {
-      setStepsWindowPosition((current) => clampStepsWindowPosition(current));
-    };
-    window.addEventListener("resize", handleResize);
-    return () => window.removeEventListener("resize", handleResize);
-  }, [clampStepsWindowPosition]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [stepsWindow.clampPosition, isStepsWindowCollapsed]);
 
   useEffect(() => {
     const mql = window.matchMedia("(orientation: portrait)");
@@ -332,11 +351,10 @@ export default function ExperienceStage({ bookingId }: { bookingId: string }) {
       await room.connect(LIVEKIT_SERVER_URL, token);
       room.remoteParticipants.forEach((participant) => subscribeToParticipantTracks(participant));
     } catch (error) {
-      console.error(error);
-      showNotification("Unable to start the live feed. Please try again.", "error");
+      console.error("Unable to start the live feed:", error);
       await teardownRoom();
     }
-  }, [attachVideoTrack, detachVideoTrack, showNotification, subscribeToParticipantTracks, teardownRoom]);
+  }, [attachVideoTrack, detachVideoTrack, subscribeToParticipantTracks, teardownRoom]);
 
   useEffect(() => {
     startStream();
@@ -354,133 +372,12 @@ export default function ExperienceStage({ bookingId }: { bookingId: string }) {
   }, [teardownRoom, unlockLandscapeOrientation]);
 
   const handleExitExperiment = useCallback(async () => {
-    stepsWindowDragRef.current = null;
-    setIsDraggingStepsWindow(false);
+    stepsWindow.cancelDrag();
     unlockLandscapeOrientation();
     await exitStageFullscreen();
     leaveExperience();
-  }, [exitStageFullscreen, leaveExperience, unlockLandscapeOrientation]);
-
-  const startStepsWindowDrag = useCallback(
-    ({
-      pointerId = null,
-      touchId = null,
-      clientX,
-      clientY,
-    }: {
-      pointerId?: number | null;
-      touchId?: number | null;
-      clientX: number;
-      clientY: number;
-    }) => {
-      stepsWindowDragRef.current = {
-        pointerId,
-        touchId,
-        startX: clientX,
-        startY: clientY,
-        originX: stepsWindowPosition.x,
-        originY: stepsWindowPosition.y,
-      };
-      setIsDraggingStepsWindow(true);
-    },
-    [stepsWindowPosition.x, stepsWindowPosition.y]
-  );
-
-  const updateStepsWindowDrag = useCallback(
-    (clientX: number, clientY: number) => {
-      const dragState = stepsWindowDragRef.current;
-      if (!dragState) return;
-      setStepsWindowPosition(
-        clampStepsWindowPosition({
-          x: dragState.originX + clientX - dragState.startX,
-          y: dragState.originY + clientY - dragState.startY,
-        })
-      );
-    },
-    [clampStepsWindowPosition]
-  );
-
-  const stopStepsWindowDrag = useCallback(() => {
-    stepsWindowDragRef.current = null;
-    setIsDraggingStepsWindow(false);
-  }, []);
-
-  const handleStepsWindowPointerDown = useCallback(
-    (event: React.PointerEvent<HTMLDivElement>) => {
-      if (event.pointerType === "mouse" && event.button !== 0) return;
-      if ((event.target as HTMLElement).closest("button")) return;
-
-      event.preventDefault();
-      startStepsWindowDrag({ pointerId: event.pointerId, clientX: event.clientX, clientY: event.clientY });
-      event.currentTarget.setPointerCapture?.(event.pointerId);
-    },
-    [startStepsWindowDrag]
-  );
-
-  const handleStepsWindowPointerMove = useCallback(
-    (event: React.PointerEvent<HTMLDivElement>) => {
-      const dragState = stepsWindowDragRef.current;
-      if (!dragState || dragState.pointerId !== event.pointerId) return;
-      event.preventDefault();
-      updateStepsWindowDrag(event.clientX, event.clientY);
-    },
-    [updateStepsWindowDrag]
-  );
-
-  const handleStepsWindowPointerUp = useCallback(
-    (event: React.PointerEvent<HTMLDivElement>) => {
-      const dragState = stepsWindowDragRef.current;
-      if (!dragState || dragState.pointerId !== event.pointerId) return;
-      stopStepsWindowDrag();
-      if (event.currentTarget.hasPointerCapture?.(event.pointerId)) {
-        event.currentTarget.releasePointerCapture(event.pointerId);
-      }
-    },
-    [stopStepsWindowDrag]
-  );
-
-  const handleStepsWindowTouchStart = useCallback(
-    (event: React.TouchEvent<HTMLDivElement>) => {
-      if (typeof window !== "undefined" && window.PointerEvent) return;
-      if ((event.target as HTMLElement).closest("button")) return;
-
-      const touch = event.changedTouches[0];
-      if (!touch) return;
-
-      event.preventDefault();
-      startStepsWindowDrag({ touchId: touch.identifier, clientX: touch.clientX, clientY: touch.clientY });
-    },
-    [startStepsWindowDrag]
-  );
-
-  const handleStepsWindowTouchMove = useCallback(
-    (event: React.TouchEvent<HTMLDivElement>) => {
-      if (typeof window !== "undefined" && window.PointerEvent) return;
-      const dragState = stepsWindowDragRef.current;
-      if (!dragState || dragState.touchId === null) return;
-
-      const activeTouch = Array.from(event.changedTouches).find((touch) => touch.identifier === dragState.touchId);
-      if (!activeTouch) return;
-
-      event.preventDefault();
-      updateStepsWindowDrag(activeTouch.clientX, activeTouch.clientY);
-    },
-    [updateStepsWindowDrag]
-  );
-
-  const handleStepsWindowTouchEnd = useCallback(
-    (event: React.TouchEvent<HTMLDivElement>) => {
-      if (typeof window !== "undefined" && window.PointerEvent) return;
-      const dragState = stepsWindowDragRef.current;
-      if (!dragState || dragState.touchId === null) return;
-
-      const endedTouch = Array.from(event.changedTouches).find((touch) => touch.identifier === dragState.touchId);
-      if (!endedTouch) return;
-
-      stopStepsWindowDrag();
-    },
-    [stopStepsWindowDrag]
-  );
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [exitStageFullscreen, leaveExperience, unlockLandscapeOrientation, stepsWindow.cancelDrag]);
 
   async function handleActionTrigger(repoId: string, id_2?: string, holdFinalPosition?: boolean) {
     if (!repoId || runningStepId || repoId === "null") return;
@@ -504,10 +401,9 @@ export default function ExperienceStage({ bookingId }: { bookingId: string }) {
 
       if (!response.ok) throw new Error("Action trigger failed");
 
-      showNotification("Action triggered successfully.", "success");
+      showNotification("Action triggered successfully.");
     } catch (error) {
-      console.error(error);
-      showNotification("Unable to trigger the action. Please try again.", "error");
+      console.error("Unable to trigger the action:", error);
     } finally {
       setRunningStepId(null);
     }
@@ -556,6 +452,13 @@ export default function ExperienceStage({ bookingId }: { bookingId: string }) {
         <div className="flex items-center gap-2">
           <button
             type="button"
+            onClick={toggleFullscreen}
+            className="rounded-xl bg-white/10 px-4 py-2 text-sm font-medium text-white backdrop-blur transition hover:bg-white/20"
+          >
+            {isFullscreen ? "Exit full screen" : "Enter full screen mode"}
+          </button>
+          <button
+            type="button"
             onClick={startStream}
             className="rounded-xl bg-white/10 px-4 py-2 text-sm font-medium text-white backdrop-blur transition hover:bg-white/20"
           >
@@ -576,17 +479,10 @@ export default function ExperienceStage({ bookingId }: { bookingId: string }) {
           {notifications.map((notification) => (
             <div
               key={notification.id}
-              className={
-                "flex items-start justify-between gap-3 rounded-2xl border p-3 text-sm shadow-lg backdrop-blur " +
-                (notification.type === "error"
-                  ? "border-red-400/30 bg-red-950/80 text-red-100"
-                  : "border-emerald-400/30 bg-emerald-950/80 text-emerald-100")
-              }
+              className="flex items-start justify-between gap-3 rounded-2xl border border-emerald-400/30 bg-emerald-950/80 p-3 text-sm text-emerald-100 shadow-lg backdrop-blur"
             >
               <div>
-                <strong className="block text-xs uppercase tracking-wide opacity-70">
-                  {notification.type === "error" ? "Error" : "Success"}
-                </strong>
+                <strong className="block text-xs uppercase tracking-wide opacity-70">Success</strong>
                 <span>{notification.message}</span>
               </div>
               <button
@@ -602,24 +498,17 @@ export default function ExperienceStage({ bookingId }: { bookingId: string }) {
       )}
 
       <div
-        ref={stepsWindowRef}
+        ref={stepsWindow.windowRef}
         className={
           "absolute z-10 w-80 max-w-[calc(100vw-2rem)] rounded-2xl border border-white/15 bg-black/80 text-white shadow-2xl backdrop-blur " +
-          (isDraggingStepsWindow ? "cursor-grabbing select-none" : "")
+          (stepsWindow.isDragging ? "cursor-grabbing select-none" : "")
         }
-        style={{ left: `${stepsWindowPosition.x}px`, top: `${stepsWindowPosition.y}px` }}
+        style={{ left: `${stepsWindow.position.x}px`, top: `${stepsWindow.position.y}px` }}
       >
         <div
-          className="flex cursor-grab items-center justify-between gap-3 border-b border-white/10 p-3"
-          onPointerDown={handleStepsWindowPointerDown}
-          onPointerMove={handleStepsWindowPointerMove}
-          onPointerUp={handleStepsWindowPointerUp}
-          onPointerCancel={handleStepsWindowPointerUp}
-          onTouchStart={handleStepsWindowTouchStart}
-          onTouchMove={handleStepsWindowTouchMove}
-          onTouchEnd={handleStepsWindowTouchEnd}
-          onTouchCancel={handleStepsWindowTouchEnd}
-          aria-grabbed={isDraggingStepsWindow}
+          className="flex cursor-grab touch-none items-center justify-between gap-3 border-b border-white/10 p-3"
+          {...stepsWindow.dragHandlers}
+          aria-grabbed={stepsWindow.isDragging}
         >
           <div>
             <strong className="block text-sm">Guided steps</strong>
@@ -651,7 +540,7 @@ export default function ExperienceStage({ bookingId }: { bookingId: string }) {
                       {formatIndex(index)}
                     </span>
                     <p className="flex-1">{step.label}</p>
-                    {step.id !== "null" ? (
+                    {step.id !== "null" && (
                       <button
                         type="button"
                         disabled={Boolean(runningStepId)}
@@ -660,8 +549,6 @@ export default function ExperienceStage({ bookingId }: { bookingId: string }) {
                       >
                         {isRunning ? "Running…" : "Run step"}
                       </button>
-                    ) : (
-                      <span className="shrink-0 text-xs text-white/50">Observe</span>
                     )}
                   </li>
                 );
@@ -670,6 +557,8 @@ export default function ExperienceStage({ bookingId }: { bookingId: string }) {
           </div>
         )}
       </div>
+
+      <ChatWindow stageRef={experimentStageRef} bookingId={bookingId} />
 
       {isPortrait && (
         <div className="absolute inset-0 z-30 grid place-items-center bg-black/95 px-6 text-center">
